@@ -45,7 +45,7 @@ api_detector/
 ### 1. Clone the project
 
 ```bash
-git clone https://github.com/your-username/api-detector.git
+git clone https://github.com/claudioandriaan/api_detector.git
 cd api-detector
 
 2. Create virtual environment (Python 3.11 recommended)
