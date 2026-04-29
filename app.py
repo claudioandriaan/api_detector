@@ -209,7 +209,7 @@ if st.sidebar.button("🚪 Logout"):
 
 menu = st.sidebar.selectbox(
     "Navigation",
-    ["🔍 Detector", "📚 Docs", "📊 Stats", "🛠 Admin"]
+    ["🔍 Detector", "📚 Docs", "📊 Stats", "🛠 Admin", "🧾 JSON Preview"]
 )
 
 # =========================================================
@@ -383,3 +383,72 @@ elif menu == "🛠 Admin":
         st.write(r)
 
     conn.close()
+elif menu == "🧾 JSON Preview":
+
+    st.title("🧾 JSON Explorer (Tree View)")
+    st.write("Paste JSON and explore it like DevTools.")
+
+    import json
+    import streamlit.components.v1 as components
+
+    json_input = st.text_area("Paste JSON here", height=200)
+
+    if st.button("Preview JSON"):
+
+        if not json_input:
+            st.warning("Please paste JSON")
+        else:
+            try:
+                data = json.loads(json_input)
+
+                st.success("JSON loaded successfully")
+
+                # Convert JSON to string for JS
+                json_str = json.dumps(data)
+
+                html_code = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <link href="https://cdnjs.cloudflare.com/ajax/libs/jsoneditor/9.10.0/jsoneditor.min.css" rel="stylesheet" type="text/css">
+                    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsoneditor/9.10.0/jsoneditor.min.js"></script>
+
+                    <style>
+                        body {{
+                            margin: 0;
+                            padding: 0;
+                            background: #0e1117;
+                        }}
+                        #jsoneditor {{
+                            width: 100%;
+                            height: 500px;
+                        }}
+                    </style>
+                </head>
+
+                <body>
+                    <div id="jsoneditor"></div>
+
+                    <script>
+                        const container = document.getElementById("jsoneditor");
+
+                        const options = {{
+                            mode: "tree",
+                            modes: ["tree", "view", "code"],
+                            search: true
+                        }};
+
+                        const editor = new JSONEditor(container, options);
+
+                        const json = {json_str};
+
+                        editor.set(json);
+                    </script>
+                </body>
+                </html>
+                """
+
+                components.html(html_code, height=520, scrolling=True)
+
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
