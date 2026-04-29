@@ -4,7 +4,7 @@ def capture_api_calls(url):
     results = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        browser = p.chromium.launch(headless=False,args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
 
         def handle_response(response):
