@@ -1,12 +1,14 @@
 import streamlit as st
+import sqlite3
+import bcrypt
+from datetime import datetime
+import sys
+import asyncio
+
 from core.browser import capture_api_calls
 from core.analyzer import is_valid_api, classify, detect_pagination
 from core.validator import test_endpoint
-from core.db import init_db, log_usage, get_usage
-
-import asyncio
-import sys
-import uuid
+from core.analytics import get_visitor_info
 
 # =========================================================
 # SYSTEM FIX (Windows only)
@@ -15,71 +17,224 @@ if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # =========================================================
-# INIT DB + SESSION (SaaS layer)
+# DATABASE HELPERS
 # =========================================================
+DB_NAME = "app.db"
+
+def get_conn():
+    return sqlite3.connect(DB_NAME, timeout=10, check_same_thread=False)
+
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE,
+        password TEXT,
+        role TEXT DEFAULT 'user'
+    )
+    """)
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS visits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT,
+        url TEXT,
+        ip TEXT,
+        country TEXT,
+        city TEXT,
+        timestamp TEXT
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
 init_db()
 
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
+def add_column_if_missing():
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("PRAGMA table_info(visits)")
+    columns = [col[1] for col in c.fetchall()]
+
+    if "url" not in columns:
+        c.execute("ALTER TABLE visits ADD COLUMN url TEXT")
+
+    conn.commit()
+    conn.close()
+    
+add_column_if_missing()
 
 # =========================================================
-# SaaS LIMIT CONFIG
+# ADMIN SETUP (RUN ONCE ONLY)
 # =========================================================
-MAX_REQUESTS = 10
+def ensure_admin():
+    conn = get_conn()
+    c = conn.cursor()
+
+    email = "claudio.andriaan@gmail.com"
+    password = "admin123"
+
+    c.execute("SELECT id FROM users WHERE email=?", (email,))
+    exists = c.fetchone()
+
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    if not exists:
+        c.execute(
+            "INSERT INTO users (email, password, role) VALUES (?, ?, ?)",
+            (email, hashed, "admin")
+        )
+
+    conn.commit()
+    conn.close()
+
+ensure_admin()
 
 # =========================================================
-# PAGE CONFIG
+# AUTH
 # =========================================================
-st.set_page_config(page_title="API Detector SaaS", layout="wide")
+def create_user(email, password, role="user"):
+    conn = get_conn()
+    c = conn.cursor()
+
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    try:
+        c.execute(
+            "INSERT INTO users (email, password, role) VALUES (?, ?, ?)",
+            (email, hashed, role)
+        )
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        conn.close()
+
+def login_user(email, password):
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("SELECT email, password, role FROM users WHERE email=?", (email,))
+    user = c.fetchone()
+    conn.close()
+
+    if not user:
+        return None
+
+    stored_password = user[1].encode()
+
+    if bcrypt.checkpw(password.encode(), stored_password):
+        return {"email": user[0], "role": user[2]}
+
+    return None
+
+def log_visit(email, url):
+    conn = get_conn()
+    c = conn.cursor()
+
+    info = get_visitor_info()
+
+    c.execute("""
+    INSERT INTO visits (user_email, url, ip, country, city, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        email,
+        url,
+        info["ip"],
+        info["country"],
+        info["city"],
+        datetime.utcnow().isoformat()
+    ))
+
+    conn.commit()
+    conn.close()
 
 # =========================================================
-# SIDEBAR NAVIGATION
+# SESSION
 # =========================================================
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+# =========================================================
+# LOGIN / REGISTER
+# =========================================================
+if not st.session_state.user:
+
+    st.title("🔐 Login / Register")
+
+    tab1, tab2 = st.tabs(["Login", "Register"])
+
+    with tab1:
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+
+        if st.button("Login"):
+            user = login_user(email, password)
+            if user:
+                st.session_state.user = user
+                log_visit(email, "LOGIN")
+                st.success("Logged in")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    with tab2:
+        email = st.text_input("New Email")
+        password = st.text_input("New Password", type="password")
+
+        if st.button("Create Account"):
+            if create_user(email, password):
+                st.success("Account created")
+            else:
+                st.error("User already exists")
+
+    st.stop()
+
+# =========================================================
+# MAIN APP
+# =========================================================
+user = st.session_state.user
+
+st.sidebar.write(f"👤 {user['email']}")
+
+if st.sidebar.button("🚪 Logout"):
+    st.session_state.user = None
+    st.rerun()
+
 menu = st.sidebar.selectbox(
     "Navigation",
-    ["🔍 Detector", "📚 Docs", "📊 Stats"]
+    ["🔍 Detector", "📚 Docs", "📊 Stats", "🛠 Admin"]
 )
 
 # =========================================================
-# PAGE 1 — DETECTOR
+# DETECTOR
 # =========================================================
 if menu == "🔍 Detector":
 
-    st.title("🔍 API Detection Tool (SaaS Edition)")
-
-    st.caption(f"Session ID: {st.session_state.session_id[:8]}")
+    st.title("🔍 API Detector")
 
     url = st.text_input("Enter website URL")
-
-    # -------------------------
-    # SaaS LIMIT CHECK
-    # -------------------------
-    usage = get_usage(st.session_state.session_id)
-
-    st.sidebar.metric("Usage", f"{len(usage)} / {MAX_REQUESTS}")
-
-    if len(usage) >= MAX_REQUESTS:
-        st.error("🚫 Free plan limit reached. Please upgrade your plan.")
-        st.stop()
 
     if st.button("Detect APIs"):
 
         if not url:
-            st.warning("Please enter a URL")
+            st.warning("Enter URL")
         else:
+            log_visit(user["email"], url)
 
-            # log usage (SaaS tracking)
-            log_usage(st.session_state.session_id, url)
-
-            with st.spinner("Analyzing website..."):
-
+            with st.spinner("Analyzing..."):
                 raw_results = capture_api_calls(url)
 
                 results = []
                 seen = set()
 
                 for entry in raw_results:
-
                     if not is_valid_api(entry):
                         continue
 
@@ -96,9 +251,6 @@ if menu == "🔍 Detector":
                         "pagination": detect_pagination(entry["url"])
                     })
 
-            # -------------------------
-            # RESULTS UI
-            # -------------------------
             if results:
                 st.success(f"{len(results)} API(s) detected")
 
@@ -109,88 +261,125 @@ if menu == "🔍 Detector":
                 st.error("No API detected")
 
 # =========================================================
-# PAGE 2 — DOCS
+# DOCS
 # =========================================================
 elif menu == "📚 Docs":
 
-    st.title("📚 Documentation")
+    st.title("📚 API Detector Documentation")
 
     st.markdown("""
-## 🚀 API Detector SaaS
+## 🔍 API Detector — Overview
 
 This tool automatically detects API endpoints from websites using Playwright.
 
----
+### Features
+- API interception
+- Endpoint classification
+- Pagination detection
+- Usage tracking per user
+- Admin analytics dashboard
 
-## ⚙️ Features
+### How it works
+1. Load website
+2. Capture network requests
+3. Extract JSON APIs
+4. Analyze endpoints
 
-- 🔍 Detect JSON API calls
-- 📦 Extract endpoints
-- 🧠 Classify API type
-- 📄 Detect pagination patterns
-- ✅ Validate endpoints
-
----
-
-## 🧠 SaaS System
-
-Each user gets:
-- Unique session ID
-- Usage tracking
-- Free tier limit (10 requests)
-
----
-
-## 💎 Future Plans
-
-- Login system
-- API keys
-- Paid plans (Stripe)
-- Proxy support
-- Export results (CSV/JSON)
+### Use cases
+- Web scraping
+- Reverse engineering APIs
+- Data extraction
 """)
 
 # =========================================================
-# PAGE 3 — STATS (SaaS DASHBOARD)
+# STATS
 # =========================================================
 elif menu == "📊 Stats":
 
-    st.title("📊 Usage Dashboard")
+    st.title("📊 Statistics")
 
-    usage = get_usage(st.session_state.session_id)
+    conn = get_conn()
+    c = conn.cursor()
 
-    st.metric("Requests used", len(usage))
-    st.metric("Remaining", MAX_REQUESTS - len(usage))
+    if user["role"] != "admin":
 
-    st.markdown("### Recent activity")
+        st.subheader("👤 Your Activity")
 
-    if usage:
-        for u in usage[:20]:
-            st.write(f"🌐 {u[0]}  |  🕒 {u[1]}")
+        c.execute("""
+            SELECT url, timestamp 
+            FROM visits 
+            WHERE user_email=? 
+            ORDER BY id DESC
+        """, (user["email"],))
+
+        data = c.fetchall()
+
+        st.metric("Total Requests", len(data))
+
+        for row in data[:10]:
+            st.write(f"🌐 {row[0]} | 🕒 {row[1]}")
+
     else:
-        st.info("No activity yet")
 
-    if len(usage) >= MAX_REQUESTS:
-        st.error("🚫 You reached the free tier limit")
+        st.subheader("🛠 Admin Overview")
+
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM visits")
+        total_requests = c.fetchone()[0]
+
+        col1, col2 = st.columns(2)
+        col1.metric("Users", total_users)
+        col2.metric("Requests", total_requests)
+
+        st.markdown("### All Activity")
+
+        c.execute("""
+            SELECT user_email, url, timestamp
+            FROM visits
+            ORDER BY id DESC
+            LIMIT 100
+        """)
+
+        for row in c.fetchall():
+            st.write(f"👤 {row[0]} | 🌐 {row[1]} | 🕒 {row[2]}")
+
+    conn.close()
 
 # =========================================================
-# FOOTER
+# ADMIN (EXTRA PANEL)
 # =========================================================
-st.markdown(
-    """
-    <style>
-    .footer {
-        position: fixed;
-        bottom: 10px;
-        right: 10px;
-        font-size: 12px;
-        color: #888;
-    }
-    </style>
+elif menu == "🛠 Admin":
 
-    <div class="footer">
-        SaaS API Detector • Built by Claudio Andriniaina
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    if user["role"] != "admin":
+        st.error("Access denied")
+        st.stop()
+
+    st.title("🛠 Admin Dashboard")
+
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) FROM users")
+    users = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM visits")
+    visits = c.fetchone()[0]
+
+    st.metric("Total Users", users)
+    st.metric("Total Visits", visits)
+
+    st.markdown("### Recent Requests")
+
+    c.execute("""
+        SELECT user_email, url, timestamp
+        FROM visits
+        ORDER BY id DESC
+        LIMIT 50
+    """)
+
+    for r in c.fetchall():
+        st.write(r)
+
+    conn.close()
