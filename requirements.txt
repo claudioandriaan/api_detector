@@ -1,0 +1,4 @@
+streamlit
+playwright
+bcrypt
+requests
