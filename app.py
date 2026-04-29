@@ -3,8 +3,11 @@ from core.browser import capture_api_calls
 from core.analyzer import is_valid_api, classify, detect_pagination
 from core.validator import test_endpoint
 import asyncio
-asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+import sys
 
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
 st.set_page_config(page_title="API Detector", layout="wide")
 
 st.title("🔍 API Detection Tool (for Scrapers)")
